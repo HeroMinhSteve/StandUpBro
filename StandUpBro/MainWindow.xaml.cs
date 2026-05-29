@@ -1,7 +1,7 @@
 using System;
 using System.Drawing;
 using System.IO;
-using System.Reflection;
+using System.Linq;
 using System.Windows;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -12,18 +12,28 @@ namespace StandUpBro;
 /// <summary>
 /// Main application window — manages the countdown timer, system tray icon,
 /// toast notifications, and the autostart registry entry.
+///
+/// Optimizations:
+///   • Strictly event-driven (DispatcherTimer only, no loops/sleeps).
+///   • Timer display updates are skipped when the window is hidden to tray
+///     so the app uses 0 % CPU while backgrounded.
+///   • Supports a "--silent" launch flag: hides to tray immediately and
+///     defers the first timer start by 10 seconds so it doesn't compete
+///     with other startup programs for CPU.
 /// </summary>
 public partial class MainWindow : Window
 {
     // ── Constants ──────────────────────────────────────────────────────
     private const string AppRegistryKey = "StandUpBro";
     private const string RunRegistryPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    private const int StartupDeferralSeconds = 10;
 
     // ── Fields ────────────────────────────────────────────────────────
     private readonly DispatcherTimer _countdownTimer;
     private readonly Forms.NotifyIcon _trayIcon;
     private TimeSpan _remainingTime;
-    private bool _isExiting; // true when user picks "Exit" from tray
+    private bool _isExiting;        // true when user picks "Exit" from tray
+    private bool _isHiddenToTray;   // true while the window is hidden (skip UI updates)
 
     // ═══════════════════════════════════════════════════════════════════
     //  Lifecycle
@@ -33,8 +43,11 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        // --- Countdown timer (ticks every second) ---
-        _countdownTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        // --- Countdown timer (ticks every second, purely event-driven) ---
+        _countdownTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
         _countdownTimer.Tick += CountdownTimer_Tick;
 
         // --- System tray icon ---
@@ -42,6 +55,57 @@ public partial class MainWindow : Window
 
         // --- Reflect current autostart state in the checkbox ---
         AutostartCheckBox.IsChecked = IsAutostartEnabled();
+
+        // --- Handle silent startup (e.g. launched by Windows autostart) ---
+        if (WasLaunchedSilently())
+        {
+            Loaded += (_, _) => HandleSilentStartup();
+        }
+    }
+
+    /// <summary>
+    /// Checks if the app was launched with the "--silent" flag,
+    /// which the autostart registry entry includes.
+    /// </summary>
+    private static bool WasLaunchedSilently()
+    {
+        string[] args = Environment.GetCommandLineArgs();
+        return args.Any(a => a.Equals("--silent", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// When launched silently at Windows startup:
+    ///   1. Immediately hide to system tray (no window flash).
+    ///   2. Use a one-shot DispatcherTimer to wait 10 s, then auto-start
+    ///      the countdown — giving Windows time to finish booting.
+    /// </summary>
+    private void HandleSilentStartup()
+    {
+        HideToTray();
+
+        // Deferred start: wait 10 seconds, then kick off the countdown.
+        // This is a one-shot timer — no loops, no Thread.Sleep.
+        var deferTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(StartupDeferralSeconds)
+        };
+        deferTimer.Tick += (_, _) =>
+        {
+            deferTimer.Stop(); // one-shot: stop immediately
+
+            if (int.TryParse(IntervalInput.Text.Trim(), out int minutes) && minutes > 0)
+            {
+                _remainingTime = TimeSpan.FromMinutes(minutes);
+                // Don't update display yet — we're hidden, save the work
+                _countdownTimer.Start();
+
+                StartButton.IsEnabled = false;
+                StopButton.IsEnabled = true;
+                IntervalInput.IsEnabled = false;
+                StatusLabel.Text = "Running — go get stuff done!";
+            }
+        };
+        deferTimer.Start();
     }
 
     /// <summary>
@@ -75,7 +139,7 @@ public partial class MainWindow : Window
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Timer logic
+    //  Timer logic  (strictly event-driven — no loops, no sleeps)
     // ═══════════════════════════════════════════════════════════════════
 
     private void StartButton_Click(object sender, RoutedEventArgs e)
@@ -89,7 +153,6 @@ public partial class MainWindow : Window
 
         _remainingTime = TimeSpan.FromMinutes(minutes);
         UpdateTimerDisplay();
-
 
         _countdownTimer.Start();
 
@@ -108,7 +171,6 @@ public partial class MainWindow : Window
     {
         _countdownTimer.Stop();
 
-
         StartButton.IsEnabled = true;
         StopButton.IsEnabled = false;
         IntervalInput.IsEnabled = true;
@@ -126,7 +188,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        UpdateTimerDisplay();
+        // Skip UI updates while hidden — saves CPU (0 % when in tray)
+        if (!_isHiddenToTray)
+            UpdateTimerDisplay();
     }
 
     private void UpdateTimerDisplay()
@@ -154,7 +218,11 @@ public partial class MainWindow : Window
         if (int.TryParse(IntervalInput.Text.Trim(), out int minutes) && minutes > 0)
         {
             _remainingTime = TimeSpan.FromMinutes(minutes);
-            UpdateTimerDisplay();
+
+            // Only touch the UI if visible
+            if (!_isHiddenToTray)
+                UpdateTimerDisplay();
+
             _countdownTimer.Start();
             StatusLabel.Text = "Running — go get stuff done!";
         }
@@ -203,12 +271,20 @@ public partial class MainWindow : Window
 
     private void HideToTray()
     {
+        _isHiddenToTray = true;
         Hide();
         WindowState = WindowState.Normal; // reset so it restores properly
     }
 
     private void ShowFromTray()
     {
+        _isHiddenToTray = false;
+
+        // Refresh the display with the current remaining time
+        // (it wasn't updated while hidden)
+        if (_countdownTimer.IsEnabled)
+            UpdateTimerDisplay();
+
         Show();
         WindowState = WindowState.Normal;
         Activate();
@@ -222,28 +298,52 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Loads the application icon from the embedded resource.
-    /// Falls back to a default system icon if the resource isn't found.
+    /// Loads the application icon for the system tray.
+    /// Tries the output directory first, then extracts from the exe, then falls back to a system icon.
+    /// Wrapped in try-catch so a malformed .ico never crashes the app.
     /// </summary>
     private static Icon LoadEmbeddedIcon()
     {
         // Try loading from the Resources folder next to the executable
         string exeDir = AppDomain.CurrentDomain.BaseDirectory;
-        string iconPath = Path.Combine(exeDir, "Resources", "icon.ico");
+        string[] candidates =
+        [
+            Path.Combine(exeDir, "Resources", "icon.ico"),
+            Path.Combine(exeDir, "icon.ico"),
+        ];
 
-        if (File.Exists(iconPath))
-            return new Icon(iconPath);
-
-        // Fallback: use the application's own icon from the assembly
-        string? exePath = Environment.ProcessPath;
-        if (exePath != null)
+        foreach (string path in candidates)
         {
-            System.Drawing.Icon? extracted = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
-            if (extracted != null)
-                return extracted;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    return new Icon(path);
+                }
+                catch
+                {
+                    // Malformed icon file — skip to next candidate
+                }
+            }
         }
 
-        // Last resort: use SystemIcons
+        // Fallback: extract the icon embedded in the exe by ApplicationIcon
+        try
+        {
+            string? exePath = Environment.ProcessPath;
+            if (exePath != null)
+            {
+                System.Drawing.Icon? extracted = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
+                if (extracted != null)
+                    return extracted;
+            }
+        }
+        catch
+        {
+            // Extraction failed — fall through
+        }
+
+        // Last resort: use a built-in system icon
         return SystemIcons.Application;
     }
 
@@ -259,6 +359,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Adds or removes the app from the HKCU Run key so it launches at login.
+    /// The "--silent" flag tells the app to hide to tray and defer startup.
     /// </summary>
     private static void SetAutostart(bool enable)
     {
@@ -269,8 +370,9 @@ public partial class MainWindow : Window
 
             if (enable)
             {
-                string exePath = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
-                key.SetValue(AppRegistryKey, $"\"{exePath}\"");
+                string exePath = Environment.ProcessPath
+                    ?? Path.Combine(AppContext.BaseDirectory, "StandUpBro.exe");
+                key.SetValue(AppRegistryKey, $"\"{exePath}\" --silent");
             }
             else
             {
