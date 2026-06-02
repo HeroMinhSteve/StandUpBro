@@ -144,9 +144,9 @@ public partial class MainWindow : Window
 
     private void StartButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!int.TryParse(IntervalInput.Text.Trim(), out int minutes) || minutes <= 0)
+        if (!int.TryParse(IntervalInput.Text.Trim(), out int minutes) || minutes <= 0 || minutes > 300)
         {
-            MessageBox.Show("Please enter a valid number of minutes (> 0).",
+            MessageBox.Show("Please enter a valid number of minutes (1–300).",
                             "Invalid interval", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
@@ -195,7 +195,9 @@ public partial class MainWindow : Window
 
     private void UpdateTimerDisplay()
     {
-        TimerDisplay.Text = _remainingTime.ToString(@"mm\:ss");
+        TimerDisplay.Text = _remainingTime.TotalHours >= 1
+            ? _remainingTime.ToString(@"h\:mm\:ss")
+            : _remainingTime.ToString(@"mm\:ss");
     }
 
     // ═══════════════════════════════════════════════════════════════════
