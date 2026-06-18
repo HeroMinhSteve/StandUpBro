@@ -10,7 +10,7 @@
 
     <!-- Viewbox wraps all content so the entire UI scales uniformly when resized -->
     <Viewbox Stretch="Uniform" StretchDirection="Both">
-        <Grid Width="420" Height="500">
+        <Grid Width="460" Height="500">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
@@ -74,14 +74,21 @@
                     <Button x:Name="StartButton"
                             Content="▶  Start"
                             Style="{StaticResource ModernButton}"
-                            Width="140"
+                            Width="120"
                             Click="StartButton_Click"
-                            Margin="0,0,12,0" />
-                    <Button x:Name="StopButton"
-                            Content="■  Stop"
+                            Margin="0,0,10,0" />
+                    <Button x:Name="ResumeButton"
+                            Content="⏵  Resume"
+                            Style="{StaticResource ModernButton}"
+                            Width="120"
+                            Click="ResumeButton_Click"
+                            IsEnabled="False"
+                            Margin="0,0,10,0" />
+                    <Button x:Name="PauseButton"
+                            Content="⏸  Pause"
                             Style="{StaticResource DangerButton}"
-                            Width="140"
-                            Click="StopButton_Click"
+                            Width="120"
+                            Click="PauseButton_Click"
                             IsEnabled="False" />
                 </StackPanel>
             </StackPanel>

@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -11,7 +12,7 @@ namespace StandUpBro;
 
 /// <summary>
 /// Main application window — manages the countdown timer, system tray icon,
-/// toast notifications, and the autostart registry entry.
+/// toast notifications, autostart registry entry, and Start Menu shortcut.
 ///
 /// Optimizations:
 ///   • Strictly event-driven (DispatcherTimer only, no loops/sleeps).
@@ -34,6 +35,7 @@ public partial class MainWindow : Window
     private TimeSpan _remainingTime;
     private bool _isExiting;        // true when user picks "Exit" from tray
     private bool _isHiddenToTray;   // true while the window is hidden (skip UI updates)
+    private bool _isPaused;         // true when the timer is paused (Resume available)
 
     // ═══════════════════════════════════════════════════════════════════
     //  Lifecycle
@@ -55,6 +57,9 @@ public partial class MainWindow : Window
 
         // --- Reflect current autostart state in the checkbox ---
         AutostartCheckBox.IsChecked = IsAutostartEnabled();
+
+        // --- Ensure Start Menu shortcut exists (for Windows Search) ---
+        EnsureStartMenuShortcut();
 
         // --- Handle silent startup (e.g. launched by Windows autostart) ---
         if (WasLaunchedSilently())
@@ -99,9 +104,7 @@ public partial class MainWindow : Window
                 // Don't update display yet — we're hidden, save the work
                 _countdownTimer.Start();
 
-                StartButton.IsEnabled = false;
-                StopButton.IsEnabled = true;
-                IntervalInput.IsEnabled = false;
+                SetUiState(running: true);
                 StatusLabel.Text = "Running — go get stuff done!";
             }
         };
@@ -139,6 +142,26 @@ public partial class MainWindow : Window
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  UI state helper
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Centralized button/input state management to avoid scattered
+    /// enable/disable logic across multiple methods.
+    /// </summary>
+    private void SetUiState(bool running = false, bool paused = false)
+    {
+        // running: timer is ticking
+        // paused:  timer is stopped but _remainingTime is preserved
+        // neither: idle / stopped (ready to start fresh)
+
+        StartButton.IsEnabled = !running;
+        ResumeButton.IsEnabled = paused;
+        PauseButton.IsEnabled = running;
+        IntervalInput.IsEnabled = !running && !paused;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  Timer logic  (strictly event-driven — no loops, no sleeps)
     // ═══════════════════════════════════════════════════════════════════
 
@@ -152,28 +175,45 @@ public partial class MainWindow : Window
         }
 
         _remainingTime = TimeSpan.FromMinutes(minutes);
+        _isPaused = false;
         UpdateTimerDisplay();
 
         _countdownTimer.Start();
 
-        StartButton.IsEnabled = false;
-        StopButton.IsEnabled = true;
-        IntervalInput.IsEnabled = false;
+        SetUiState(running: true);
         StatusLabel.Text = "Running — go get stuff done!";
     }
 
-    private void StopButton_Click(object sender, RoutedEventArgs e)
+    private void PauseButton_Click(object sender, RoutedEventArgs e)
     {
-        StopTimer();
+        _countdownTimer.Stop();
+        _isPaused = true;
+
+        SetUiState(paused: true);
+        StatusLabel.Text = "Paused";
     }
 
+    private void ResumeButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_isPaused || _remainingTime <= TimeSpan.Zero)
+            return;
+
+        _isPaused = false;
+        _countdownTimer.Start();
+
+        SetUiState(running: true);
+        StatusLabel.Text = "Running — go get stuff done!";
+    }
+
+    /// <summary>
+    /// Fully stops the timer and resets to idle state.
+    /// </summary>
     private void StopTimer()
     {
         _countdownTimer.Stop();
+        _isPaused = false;
 
-        StartButton.IsEnabled = true;
-        StopButton.IsEnabled = false;
-        IntervalInput.IsEnabled = true;
+        SetUiState();
         StatusLabel.Text = "Stopped";
     }
 
@@ -226,6 +266,7 @@ public partial class MainWindow : Window
                 UpdateTimerDisplay();
 
             _countdownTimer.Start();
+            SetUiState(running: true);
             StatusLabel.Text = "Running — go get stuff done!";
         }
         else
@@ -401,6 +442,61 @@ public partial class MainWindow : Window
         catch
         {
             return false;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Start Menu shortcut (Windows Search integration)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Creates a StandUpBro.lnk shortcut in the user's Start Menu Programs
+    /// folder so Windows Search can index and find the app.
+    /// Uses COM IShellLink via WshShell — no extra NuGet packages needed.
+    /// Silently skips if the shortcut already exists.
+    /// </summary>
+    private static void EnsureStartMenuShortcut()
+    {
+        try
+        {
+            string startMenuFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                @"Microsoft\Windows\Start Menu\Programs");
+
+            string shortcutPath = Path.Combine(startMenuFolder, "StandUpBro.lnk");
+
+            // Skip if the shortcut already exists
+            if (File.Exists(shortcutPath))
+                return;
+
+            string targetExe = Environment.ProcessPath
+                ?? Path.Combine(AppContext.BaseDirectory, "StandUpBro.exe");
+
+            // Use the Windows Script Host COM object to create a .lnk file.
+            // Type is resolved at runtime — avoids a build-time dependency.
+            Type? shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType == null) return;
+
+            dynamic? shell = Activator.CreateInstance(shellType);
+            if (shell == null) return;
+
+            try
+            {
+                dynamic shortcut = shell.CreateShortcut(shortcutPath);
+                shortcut.TargetPath = targetExe;
+                shortcut.WorkingDirectory = AppContext.BaseDirectory;
+                shortcut.Description = "StandUpBro — Stand-up reminder";
+                shortcut.Save();
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(shell);
+            }
+        }
+        catch
+        {
+            // Non-critical — silently ignore shortcut creation failures.
+            // The app works perfectly fine without a Start Menu shortcut.
         }
     }
 }
