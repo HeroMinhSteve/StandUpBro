@@ -158,7 +158,7 @@ public partial class MainWindow : Window
         StartButton.IsEnabled = !running;
         ResumeButton.IsEnabled = paused;
         PauseButton.IsEnabled = running;
-        IntervalInput.IsEnabled = !running && !paused;
+        IntervalInput.IsEnabled = !running;
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -318,6 +318,12 @@ public partial class MainWindow : Window
         Hide();
         WindowState = WindowState.Normal; // reset so it restores properly
     }
+
+    /// <summary>
+    /// Public entry point for the IPC listener in App.xaml.cs to safely
+    /// restore the window. Delegates to ShowFromTray().
+    /// </summary>
+    public void BringToFront() => ShowFromTray();
 
     private void ShowFromTray()
     {

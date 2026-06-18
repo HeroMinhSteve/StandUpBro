@@ -91,14 +91,14 @@ public partial class App : Application
 
                 if (signaled && !ct.IsCancellationRequested)
                 {
-                    // Marshal back to the UI thread to safely show the window
+                    // Marshal back to the UI thread to safely show the window.
+                    // Call ShowFromTray() so _isHiddenToTray is reset and the
+                    // timer display refreshes properly.
                     Current.Dispatcher.Invoke(() =>
                     {
-                        if (MainWindow is Window window)
+                        if (MainWindow is MainWindow mw)
                         {
-                            window.Show();
-                            window.WindowState = WindowState.Normal;
-                            window.Activate();
+                            mw.BringToFront();
                         }
                     });
                 }
